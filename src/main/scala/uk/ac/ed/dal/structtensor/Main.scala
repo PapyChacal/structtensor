@@ -145,7 +145,7 @@ object Main {
           .map(e => e.slice(6, e.length))
           .flatMap(_.split(";").map(_.trim).toSeq)
           .map(iter_str =>
-            fastparse.parse(iter_str, Parser.iterators(_)).get.value
+            fastparse.parse(iter_str, Parser.iterators(using _)).get.value
           )
           .toMap
         // Remaining input lines AKA the program + compression hatches
@@ -169,7 +169,7 @@ object Main {
 
         val parsedPreprocess = preprocess_lines
           .map(line => {
-            val Parsed.Success(res, _) = parse(line, parser(_))
+            val Parsed.Success(res, _) = parse(line, parser(using _))
             res.head
           })
           .toSeq
@@ -178,7 +178,7 @@ object Main {
         // Program parsed as bunch of rules
         val parsedComputation = computation_lines
           .map(line => {
-            val Parsed.Success(res, _) = parse(line, parser(_))
+            val Parsed.Success(res, _) = parse(line, parser(using _))
             res.head
           })
           .toSeq
