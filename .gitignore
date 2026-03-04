@@ -19,3 +19,6 @@ scripts/
 src/test/resources/test_outputs/
 project/*
 !project/build.properties
+
+# Mill output directory
+out/

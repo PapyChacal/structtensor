@@ -9,6 +9,7 @@ import codegen._
 
 import java.io.File
 import scopt.OParser
+import java.io.FileNotFoundException
 
 object Main {
   def main(args: Array[String]): Unit = {
@@ -106,7 +107,13 @@ object Main {
         import Compiler._
         import Optimizer._
         import Codegen._
-        val lines = scala.io.Source.fromFile(config.inFilePath).mkString
+        val source = try {
+          scala.io.Source.fromFile(config.inFilePath)
+        } catch {
+          case e: FileNotFoundException =>
+            scala.io.Source.fromResource(config.inFilePath)
+        }
+        val lines = source.mkString
         val lineSeqInit = lines
           .split("\n")
           .toSeq
