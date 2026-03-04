@@ -8,7 +8,7 @@ To learn more about StructTensor, please read [our paper published in OOPSLA'23]
 
 ## Requirements
 
-To run this framework, you need [Scala](https://www.scala-lang.org/download/all.html) 3 of minimum version 3.3.3 and [sbt](https://www.scala-sbt.org/download/) of minimum version 1.10.0. Note that sbt relies on JDK version 8. To compile the generated code, any C++ compiler, such as GCC or Clang can be used.
+To run this framework, you need [Scala](https://www.scala-lang.org/download/all.html) 3 of minimum version 3.3.3. To compile the generated code, any C++ compiler, such as GCC or Clang can be used.
 
 ## Usage
 
@@ -211,10 +211,7 @@ for (int iter = 0; iter < ITERS; ++iter) {
 To generate code for one of the existing `.stur` codes in the `examples/` directory, use the following command:
 
 ```
-$ sbt
-sbt:struct-tensor> clean
-sbt:struct-tensor> compile
-sbt:struct-tensor> run -i examples/<name>.stur -o <path/to/output.cpp>
+$ ./mill run -i examples/<name>.stur -o <path/to/output.cpp>
 ```
 
 This will read the file provided after `-i`, generate a C++ code for the kernel named `<name>.stur`, and write the output to the address provided after the `-o` flag. The code will be in a void function named `fn` and can be copied and used in an existing C++ code base.
@@ -222,10 +219,7 @@ This will read the file provided after `-i`, generate a C++ code for the kernel 
 To allocate and initiate the tensors and generate a runnable file, use the following command:
 
 ```
-$ sbt 
-sbt:struct-tensor> clean
-sbt:struct-tensor> compile
-sbt:struct-tensor> run -i examples/<name>.stur -o <path/to/output.cpp> --init-tensors
+$ ./mill run -i examples/<name>.stur -o <path/to/output.cpp> --init-tensors
 ```
 
 This way, a C++ code with a `main` function containing tensor allocation, random initiation, and the computation will be created. The generated code can be compiled using:
@@ -236,7 +230,7 @@ clang++ <path/to/output.cpp>  -std=c++17  -O3  -ffast-math  -march=native  -mtun
 
 ### Command line options
 
-All command line options can be obtained by using the command `sbt run --help`. The output can be seen as follows:
+All command line options can be obtained by using the command `./mill run --help`. The output can be seen as follows:
 
 ```
 struct-tensor 0.1

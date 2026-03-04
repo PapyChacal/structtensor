@@ -9,9 +9,10 @@ import codegen._
 
 import java.io.File
 import scopt.OParser
+import java.io.FileNotFoundException
 
 object Main {
-  def main(args: Array[String]) = {
+  def main(args: Array[String]): Unit = {
   import Optimizer._
   import Utils._
 
@@ -106,32 +107,48 @@ object Main {
         import Compiler._
         import Optimizer._
         import Codegen._
-        val lines = scala.io.Source.fromFile(config.inFilePath).mkString
+        val source = try {
+          scala.io.Source.fromFile(config.inFilePath)
+        } catch {
+          case e: FileNotFoundException =>
+            scala.io.Source.fromResource(config.inFilePath)
+        }
+        val lines = source.mkString
         val lineSeqInit = lines
           .split("\n")
           .toSeq
           .filter(_.nonEmpty)
           .filterNot(_.startsWith("#"))
+
+        // Specify names of symbols
         val (symbols_lines, symbols_index) =
           lineSeqInit.zipWithIndex.filter(_._1.startsWith("symbols:")).unzip
+
+        // Specify names of tensors expected to be output
         val (outputs_lines, outputs_index) =
           lineSeqInit.zipWithIndex.filter(_._1.startsWith("outputs:")).unzip
+
+        // Specify names of iterators
         val (iters_lines, iters_index) =
           lineSeqInit.zipWithIndex.filter(_._1.startsWith("iters:")).unzip
+        // parsed symbols names
         val symbols = symbols_lines
           .map(e => e.slice(8, e.length))
           .flatMap(_.split(",").map(_.trim).toSeq)
           .map(Variable(_))
+        // parsed outputs names
         val outputs_names = outputs_lines
           .map(e => e.slice(8, e.length))
           .flatMap(_.split(",").map(_.trim).toSeq)
+        // parsed iterators names and vars
         val iters_map = iters_lines
           .map(e => e.slice(6, e.length))
           .flatMap(_.split(";").map(_.trim).toSeq)
           .map(iter_str =>
-            fastparse.parse(iter_str, Parser.iterators(_)).get.value
+            fastparse.parse(iter_str, Parser.iterators(using _)).get.value
           )
           .toMap
+        // Remaining input lines AKA the program + compression hatches
         val lineSeq = lineSeqInit.zipWithIndex
           .filterNot(x =>
             symbols_index.contains(x._2) ||
@@ -139,10 +156,12 @@ object Main {
               iters_index.contains(x._2)
           )
           .map(_._1)
+        // Manual arbitrary access computation danger zone start
         val preprocess_start_index = lineSeq.indexOf("@preprocess_start")
         val preprocess_end_index = lineSeq.indexOf("@preprocess_end")
         val preprocess_lines =
           lineSeq.slice(preprocess_start_index + 1, preprocess_end_index)
+        // Remaining input lines AKA JUST the program 
         val computation_lines = lineSeq.slice(
           0,
           preprocess_start_index
@@ -150,16 +169,22 @@ object Main {
 
         val parsedPreprocess = preprocess_lines
           .map(line => {
-            val Parsed.Success(res, _) = parse(line, parser(_))
+            val Parsed.Success(res, _) = parse(line, parser(using _))
             res.head
           })
           .toSeq
+        // Danger zone end?
+
+        // Program parsed as bunch of rules
         val parsedComputation = computation_lines
           .map(line => {
-            val Parsed.Success(res, _) = parse(line, parser(_))
+            val Parsed.Success(res, _) = parse(line, parser(using _))
             res.head
           })
           .toSeq
+        
+        // cOOKED COMPRESSION RULES
+        // Ignore if ignoring manual compression hatch
         val (
           all_tensors_preprocess,
           tensorComputations_preprocess,
@@ -167,6 +192,10 @@ object Main {
           uniqueSets_preprocess,
           redundancyMaps_preprocess
         ) = convertRules(parsedPreprocess)
+
+        // Tensor information extracted from the computation rules, before
+        // any inference.
+        // Probably what we want to ScaIR out!
         val (
           all_tensors_computation,
           tensorComputations_computation,
@@ -184,7 +213,13 @@ object Main {
           symbols,
           outputs_names
         )
+        val ScaIR = false
 
+        if (ScaIR) {
+          // wow
+          return ()
+        } 
+        
         val (newUS, newRM, newCC, ccRuleSeq, rcRuleSeq) =
           tensorComputations_computation.foldLeft(
             (
