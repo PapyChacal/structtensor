@@ -218,6 +218,7 @@ object Main {
           symbols,
           outputs_names
         )
+
         val ScaIR = false
 
         if (ScaIR) {
@@ -295,8 +296,8 @@ object Main {
           val mlirGen = MLIRGen(symbols, iters_map)
           val module = ModuleOp(Region(mlirGen.genProgram(ccRuleSeq)))
           val printer = config.outFilePath match
-            case "" => Printer(strictlyGeneric = true)
-            case path => Printer(p = PrintWriter(FileWriter(path)), strictlyGeneric = true)
+            case "" => Printer()
+            case path => Printer(p = PrintWriter(FileWriter(path)))
           printer.print(module)
           printer.flush()
           return

@@ -39,13 +39,13 @@ case class MLIRGen(symbols: Seq[Variable], iters_map: Map[String, Seq[Variable]]
                 RankedMemrefType(elementType = Float32Type(), shape = ArrayAttribute(Seq.fill(rank)(IntData(-1))))
         }
         val outputTypes = Seq()
-        val f = func.Func("stur", FunctionType(inputTypes, outputTypes), sym_visibility = None, Region(Block(
+        val f = func.Func("stur", FunctionType(inputTypes, outputTypes), sym_visibility = None, Region(Seq(Block(
             inputTypes,
             args =>
                 val (symbolArgs, tensorArgs) = args.splitAt(symbols.length)
                 given values : Map[String, Value[?]] = (symbols.map(_.name) zip symbolArgs).toMap ++ (inputTensors.map(_.name) zip tensorArgs).toMap
                 rules.flatMap(genRule(_)(using CompressedTensor)) :+ func.Return(Seq())
-        )))
+        ))))
         CSE()(using RewriteMethods).simplify(f.body)
         f
     }
@@ -147,7 +147,6 @@ case class MLIRGen(symbols: Seq[Variable], iters_map: Map[String, Seq[Variable]]
         boundGen(ubs, lower = false)
     }
     
-
     def genSingleProdRec(prod: Prod, head: Access, iters: Seq[Variable])(using kind: AccessType, values: Map[String, Value[?]], iterConds: Map[Variable, Seq[Comparison]]): Seq[Operation] = {
         iters match
             case h::t =>
