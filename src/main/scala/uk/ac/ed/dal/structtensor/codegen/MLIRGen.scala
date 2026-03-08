@@ -130,23 +130,13 @@ case class MLIRGen(symbols: Seq[Variable], iters_map: Map[String, Seq[Variable]]
     private def boundGen(lbs: Seq[Index], lower: Boolean)(using values: Map[String, Value[?]]): (value: Value[AnyIntegerType], operations: Seq[Operation]) = {
         val aggregateOp = if (lower) arith.MaxUI.apply else arith.MinUI.apply
         val (bounds, operations) = lbs.map(indexGen(_)).unzip
-        bounds match
-            case Seq(single) => (single, operations.flatten)
-            case _ =>
-                val minOp = aggregateOp(bounds(0), bounds(1), Result(IndexType()))
-                val min = minOp match
-                    case arith.MaxUI(_, _, res) => res
-                    case arith.MinUI(_, _, res) => res
-                
-                bounds.drop(2).foldLeft((min, operations.flatten :+ minOp))(
-                    (acc, bound) =>
-                        val (min, ops) = acc
-                        val newMinOp = aggregateOp(min, bound, Result(IndexType()))
-                        val newMin = minOp match
-                            case arith.MaxUI(_, _, res) => res
-                            case arith.MinUI(_, _, res) => res
-                        (newMin, ops :+ newMinOp)
-                )
+        val (res, aggOps) = bounds.tail.foldLeft((bounds.head, Seq.empty[Operation])) {
+            case ((acc, ops), b) =>
+                val res = Result(IndexType())
+                val op = aggregateOp(acc, b, res)
+                (res, ops :+ op)
+        }
+        (res, operations.flatten ++ aggOps)
     }
 
     def lbGen(lbs: Seq[Index])(using values: Map[String, Value[?]]): (value: Value[AnyIntegerType], operations: Seq[Operation]) = {
