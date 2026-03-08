@@ -18,7 +18,7 @@ object `package` extends ScalaModule:
         mvn"org.scala-lang.modules::scala-parser-combinators::2.0.0",
         mvn"com.lihaoyi::fastparse::3.0.2",
         mvn"com.github.scopt::scopt::4.1.0",
-        mvn"io.github.edin-dal::scair-dialects::0.0.0-1-a33f38-SNAPSHOT",
+        mvn"io.github.edin-dal::scair-passes::0.0.0-1-a33f38-SNAPSHOT",
     )
 
     object test extends ScalaTests with TestModule.ScalaTest:
