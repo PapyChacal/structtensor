@@ -10,6 +10,11 @@ import codegen._
 import java.io.File
 import scopt.OParser
 import java.io.FileNotFoundException
+import scair.dialects.builtin.ModuleOp
+import scair.ir.*
+import scair.Printer
+import java.io.FileWriter
+import java.io.PrintWriter
 
 object Main {
   def main(args: Array[String]): Unit = {
@@ -284,6 +289,17 @@ object Main {
             acc._4 :+ ccRule
           )
         })
+
+        if config.codeLang == "MLIR" then
+          given AccessType = CompressedTensor
+          val mlirGen = MLIRGen(symbols, iters_map)
+          val module = ModuleOp(Region(mlirGen.genProgram(ccRuleSeq)))
+          val printer = config.outFilePath match
+            case "" => Printer(strictlyGeneric = true)
+            case path => Printer(p = PrintWriter(FileWriter(path)), strictlyGeneric = true)
+          printer.print(module)
+          printer.flush()
+          return
 
         val preprocessComputation = ccRuleSeq_preprocess
           .map(r => Codegen(r, symbols, config.codeLang, Tensor, iters_map))
