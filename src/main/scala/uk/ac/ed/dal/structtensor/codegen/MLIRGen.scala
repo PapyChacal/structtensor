@@ -13,8 +13,9 @@ import scair.dialects.builtin.*
 import scair.dialects.arith.AnyIntegerType
 import scair.passes.cse.CSE
 import scair.transformations.RewriteMethods
+import uk.ac.ed.dal.structtensor.parser.Convertor.getAllTensors
 
-case class MLIRGen(symbols: Seq[Variable], iters_map: Map[String, Seq[Variable]]) {
+case class MLIRGen(symbols: Seq[Variable], iters_map: Map[String, Seq[Variable]], dimMap: Map[String, Seq[Dim]], outputs: Seq[(name: String, rank: Int)]) {
 
     def getInputTensors(rules: Seq[Rule], defined: Seq[String] = Seq.empty): Seq[(name: String, rank: Int)] = {
         rules match
@@ -31,31 +32,35 @@ case class MLIRGen(symbols: Seq[Variable], iters_map: Map[String, Seq[Variable]]
     def genProgram(rules: Seq[Rule]): func.Func = {
 
         val inputTensors = getInputTensors(rules)
-        // println(s"Input tensors: $inputTensors")
+        val outputTensors = outputs.filterNot(inputTensors.contains)
         
 
         val inputTypes = symbols.map(_ => IndexType()) ++ inputTensors.map{
             case (name, rank) =>
                 RankedMemrefType(elementType = Float32Type(), shape = ArrayAttribute(Seq.fill(rank)(IntData(-1))))
         }
-        val outputTypes = Seq()
+        val outputTypes = outputTensors.map {
+            case (name, rank) =>
+                RankedMemrefType(elementType = Float32Type(), shape = ArrayAttribute(Seq.fill(rank)(IntData(-1))))
+        }
         val f = func.Func("stur", FunctionType(inputTypes, outputTypes), sym_visibility = None, Region(Seq(Block(
             inputTypes,
             args =>
                 val (symbolArgs, tensorArgs) = args.splitAt(symbols.length)
-                given values : Map[String, Value[?]] = (symbols.map(_.name) zip symbolArgs).toMap ++ (inputTensors.map(_.name) zip tensorArgs).toMap
-                rules.flatMap(genRule(_)(using CompressedTensor)) :+ func.Return(Seq())
+                given values : mutable.Map[String, Value[?]] = mutable.Map.from((symbols.map(_.name) zip symbolArgs) ++ (inputTensors.map(_.name) zip tensorArgs))
+                rules.flatMap(genRule(_)(using CompressedTensor)) :+ func.Return(outputTensors.map(o => values(o.name)))
         ))))
         CSE()(using RewriteMethods).simplify(f.body)
         f
     }
-    def genRule(rule: Rule)(using kind: AccessType, values: Map[String, Value[?]]): Seq[Operation] = {
+    def genRule(rule: Rule)(using kind: AccessType, values: mutable.Map[String, Value[?]]): Seq[Operation] = {
         values.get(rule.head.name) match
             // If the head is not defined, we allocate it
             case None => 
-                val alloc = memref.Alloc(Seq(), Seq(), Result(RankedMemrefType(elementType = Float32Type(), shape = ArrayAttribute(Seq.fill(rule.head.vars.length)(IntData(-1))))), alignment = IntegerAttr(IntData(0), I64))
-                given Map[String, Value[?]] = values + (rule.head.name -> alloc.memref)
-                alloc +: genRule(rule)
+                val dims = dimMap(rule.head.name)
+                val (dimValues, dimOps) = dims.map(indexGen).unzip
+                val alloc = memref.Alloc(dimValues.asInstanceOf[Seq[Value[IndexType]]], Seq(), Result(RankedMemrefType(elementType = Float32Type(), shape = ArrayAttribute(Seq.fill(rule.head.vars.length)(IntData(-1))))), alignment = IntegerAttr(IntData(0), I64))
+                (dimOps.flatten :+ alloc) ++ genRule(rule)(using kind, values += (rule.head.name -> alloc.memref))
             case Some(_) =>
                 val computationHead = rule.head
                 rule.body.prods.flatMap(genSingleProd(_, computationHead))
@@ -92,7 +97,7 @@ case class MLIRGen(symbols: Seq[Variable], iters_map: Map[String, Seq[Variable]]
         (lbs, ubs, eqs)
     }
 
-    def genSingleProd(prod: Prod, head: Access)(using kind: AccessType, values: Map[String, Value[?]]): Seq[Operation] = {
+    def genSingleProd(prod: Prod, head: Access)(using kind: AccessType, values: mutable.Map[String, Value[?]]): Seq[Operation] = {
         val conditions =
             prod.exps.collect { case condition: Comparison => condition }
         val accesses = prod.exps.collect { case access: Access => access }
@@ -112,7 +117,7 @@ case class MLIRGen(symbols: Seq[Variable], iters_map: Map[String, Seq[Variable]]
         genSingleProdRec(prod, head, variables)
     }
 
-    def indexGen(index: Index)(using values: Map[String, Value[?]]): (Value[AnyIntegerType], Seq[Operation]) = {
+    def indexGen(index: Index)(using values: mutable.Map[String, Value[?]]): (Value[AnyIntegerType], Seq[Operation]) = {
         index match
             case v: Variable => (values(v.name).asInstanceOf[Value[AnyIntegerType]], Seq())
             case ConstantInt(c) => 
@@ -127,7 +132,7 @@ case class MLIRGen(symbols: Seq[Variable], iters_map: Map[String, Seq[Variable]]
                 
     }
 
-    private def boundGen(lbs: Seq[Index], lower: Boolean)(using values: Map[String, Value[?]]): (value: Value[AnyIntegerType], operations: Seq[Operation]) = {
+    private def boundGen(lbs: Seq[Index], lower: Boolean)(using values: mutable.Map[String, Value[?]]): (value: Value[AnyIntegerType], operations: Seq[Operation]) = {
         val aggregateOp = if (lower) arith.MaxUI.apply else arith.MinUI.apply
         val (bounds, operations) = lbs.map(indexGen(_)).unzip
         val (res, aggOps) = bounds.tail.foldLeft((bounds.head, Seq.empty[Operation])) {
@@ -139,15 +144,15 @@ case class MLIRGen(symbols: Seq[Variable], iters_map: Map[String, Seq[Variable]]
         (res, operations.flatten ++ aggOps)
     }
 
-    def lbGen(lbs: Seq[Index])(using values: Map[String, Value[?]]): (value: Value[AnyIntegerType], operations: Seq[Operation]) = {
+    def lbGen(lbs: Seq[Index])(using values: mutable.Map[String, Value[?]]): (value: Value[AnyIntegerType], operations: Seq[Operation]) = {
         boundGen(lbs, lower = true)
     }
 
-    def ubGen(ubs: Seq[Index])(using values: Map[String, Value[?]]): (value: Value[AnyIntegerType], operations: Seq[Operation]) = {
+    def ubGen(ubs: Seq[Index])(using values: mutable.Map[String, Value[?]]): (value: Value[AnyIntegerType], operations: Seq[Operation]) = {
         boundGen(ubs, lower = false)
     }
     
-    def genSingleProdRec(prod: Prod, head: Access, iters: Seq[Variable])(using kind: AccessType, values: Map[String, Value[?]], iterConds: Map[Variable, Seq[Comparison]]): Seq[Operation] = {
+    def genSingleProdRec(prod: Prod, head: Access, iters: Seq[Variable])(using kind: AccessType, values: mutable.Map[String, Value[?]], iterConds: Map[Variable, Seq[Comparison]]): Seq[Operation] = {
         iters match
             case h::t =>
                 // println(s"Generating loop for variable $h")
@@ -158,7 +163,7 @@ case class MLIRGen(symbols: Seq[Variable], iters_map: Map[String, Seq[Variable]]
                 val step = Result(IndexType())
                 val stepOp = arith.Constant(IntegerAttr(IntData(1), IndexType()), step)
                 val loop = scf.ForOp(lowerBound = lbVal, upperBound = ubVal, step = step, initArgs = Seq(), resultss = Seq(), region = Region(Block(IndexType(), arg =>
-                    given Map[String, Value[?]] = values + (h.name -> arg) 
+                    given mutable.Map[String, Value[?]] = values += (h.name -> arg) 
                     genSingleProdRec(prod, head, t) :+ scf.YieldOp(Seq()))))
                 lbOps ++ ubOps :+ stepOp :+ loop
             case Nil =>

@@ -293,7 +293,16 @@ object Main {
 
         if config.codeLang == "MLIR" then
           given AccessType = CompressedTensor
-          val mlirGen = MLIRGen(symbols, iters_map)
+          val dimInfoMap = dimInfo_computation.distinct.toAccessMap
+          val distinctTensors = getAllTensors(ccRuleSeq).distinctBy(_.name)
+
+          val dimMap = distinctTensors.map(t => (t.name -> dimInfoMap(t))).toMap
+
+          val outputs = (outputs_names match
+            case Nil => distinctTensors.map(_.name)
+            case names => names).map(n => (name = n, rank = dimMap(n).length))
+          
+          val mlirGen = MLIRGen(symbols, iters_map, dimMap, outputs)
           val module = ModuleOp(Region(mlirGen.genProgram(ccRuleSeq)))
           val printer = config.outFilePath match
             case "" => Printer()
