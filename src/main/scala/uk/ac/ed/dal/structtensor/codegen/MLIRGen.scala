@@ -59,7 +59,7 @@ case class MLIRGen(symbols: Seq[Variable], iters_map: Map[String, Seq[Variable]]
             case None => 
                 val dims = dimMap(rule.head.name)
                 val (dimValues, dimOps) = dims.map(indexGen).unzip
-                val alloc = memref.Alloc(dimValues.asInstanceOf[Seq[Value[IndexType]]], Seq(), Result(RankedMemrefType(elementType = Float32Type(), shape = ArrayAttribute(Seq.fill(rule.head.vars.length)(IntData(-1))))), alignment = IntegerAttr(IntData(0), I64))
+                val alloc = memref.Alloc(dimValues.asInstanceOf[Seq[Value[IndexType]]], Seq(), Result(RankedMemrefType(elementType = Float32Type(), shape = ArrayAttribute(Seq.fill(rule.head.vars.length)(IntData(-1))))))
                 (dimOps.flatten :+ alloc) ++ genRule(rule)(using kind, values += (rule.head.name -> alloc.memref))
             case Some(_) =>
                 val computationHead = rule.head
@@ -151,11 +151,21 @@ case class MLIRGen(symbols: Seq[Variable], iters_map: Map[String, Seq[Variable]]
     def ubGen(ubs: Seq[Index])(using values: mutable.Map[String, Value[?]]): (value: Value[AnyIntegerType], operations: Seq[Operation]) = {
         boundGen(ubs, lower = false)
     }
+
+    def constantFloat(c: Double | Int): (Value[Float32Type], Operation) = {
+        val d = c match
+            case i: Int => i.toDouble
+            case d: Double => d
+        val result = Result(Float32Type())
+        val constantOp = arith.Constant(FloatAttr(FloatData(d), Float32Type()), result)
+        (result, constantOp)
+    }
     
     def genSingleProdRec(prod: Prod, head: Access, iters: Seq[Variable])(using kind: AccessType, values: mutable.Map[String, Value[?]], iterConds: Map[Variable, Seq[Comparison]]): Seq[Operation] = {
         iters match
             case h::t =>
                 // println(s"Generating loop for variable $h")
+                // println(s"Product: ${prod.toString()}")
                 // println(s"Gathered conditions: ${iterConds.getOrElse(h, Seq())}")
                 val (lbs, ubs, eqs) = getBoundsOnVariable(h, iterConds.getOrElse(h, Seq()))
                 val (lbVal, lbOps) = lbGen(lbs)
@@ -172,24 +182,23 @@ case class MLIRGen(symbols: Seq[Variable], iters_map: Map[String, Seq[Variable]]
                         val result = Result(Float32Type())
                         val loadOp = memref.Load(values(name).asInstanceOf[Value[MemrefType]], vars.map(v => values(v.name).asInstanceOf[Value[IndexType]]), result)
                         (result, loadOp)
-                    case ConstantInt(c) =>
-                        val result = Result(Float32Type())
-                        val constantOp = arith.Constant(FloatAttr(FloatData(c), Float32Type()), result)
-                        (result, constantOp)
-                    case ConstantDouble(c) =>
-                        val result = Result(Float32Type())
-                        val constantOp = arith.Constant(FloatAttr(FloatData(c), Float32Type()), result)
-                        (result, constantOp)
+                    case ConstantInt(c) => constantFloat(c)
+                    case ConstantDouble(c) => constantFloat(c)
                 }
-                val (vals, loadOps) = accesses.unzip
-                val (res, mulOps) = vals.tail.foldLeft((vals.head, Seq.empty[Operation])) {
+                val (factors, loadOps) = accesses.unzip
+                val (res, mulOps) = factors.tail.foldLeft((factors.head, Seq.empty[Operation])) {
                     case ((acc, ops), b) =>
                         val res = Result(Float32Type())
                         val mulOp = arith.MulF(acc, b, res, arith.FastMathFlagsAttr(arith.FastMathFlags.fast))
                         (res, ops :+ mulOp)
                 }
-                val storeOp = memref.Store(res, values(head.name).asInstanceOf[Value[MemrefType]], head.vars.map(v => values(v.name).asInstanceOf[Value[IndexType]]))
-                loadOps ++ mulOps :+ storeOp
+                val headValue = values(head.name).asInstanceOf[Value[MemrefType]]
+                val headIndices = head.vars.map(v => values(v.name).asInstanceOf[Value[IndexType]])
+
+                val loadOp = memref.Load(headValue, headIndices, Result(Float32Type()))
+                val addOp = arith.AddF(loadOp.result.asInstanceOf[Value[Float32Type]], res, Result(Float32Type()), arith.FastMathFlagsAttr(arith.FastMathFlags.fast))
+                val storeOp = memref.Store(addOp.result, values(head.name).asInstanceOf[Value[MemrefType]], headIndices)
+                loadOps ++ mulOps :+ loadOp :+ addOp :+ storeOp
 
     }
 }
