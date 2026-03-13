@@ -15,6 +15,8 @@ import scair.ir.*
 import scair.Printer
 import java.io.FileWriter
 import java.io.PrintWriter
+import scair.passes.cse.CSE
+import scair.transformations.RewriteMethods
 
 object Main {
   def main(args: Array[String]): Unit = {
@@ -303,7 +305,12 @@ object Main {
             case names => names).map(n => (name = n, rank = dimMap(n).length))
           
           val mlirGen = MLIRGen(symbols, iters_map, dimMap, outputs)
-          val module = ModuleOp(Region(mlirGen.genProgram(ccRuleSeq)))
+          val compute = mlirGen.genCompute(ccRuleSeq)
+
+          val reconstructs = mlirGen.genReconstruct(rcRuleSeq)
+
+          val module = ModuleOp(Region(compute +: reconstructs))
+          CSE()(using RewriteMethods).simplify(module.body)
           val printer = config.outFilePath match
             case "" => Printer()
             case path => Printer(p = PrintWriter(FileWriter(path)))

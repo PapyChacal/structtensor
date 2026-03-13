@@ -11,8 +11,6 @@ import Codegen.reorder
 import scair.dialects.{func, scf, arith, memref}
 import scair.dialects.builtin.*
 import scair.dialects.arith.AnyIntegerType
-import scair.passes.cse.CSE
-import scair.transformations.RewriteMethods
 import uk.ac.ed.dal.structtensor.parser.Convertor.getAllTensors
 
 case class MLIRGen(symbols: Seq[Variable], iters_map: Map[String, Seq[Variable]], dimMap: Map[String, Seq[Dim]], outputs: Seq[(name: String, rank: Int)]) {
@@ -29,37 +27,50 @@ case class MLIRGen(symbols: Seq[Variable], iters_map: Map[String, Seq[Variable]]
                 (inputs ++ getInputTensors(t, defined :+ head)).distinct
     }
 
-    def genProgram(rules: Seq[Rule]): func.Func = {
+    def memrefType(rank: Int) = RankedMemrefType(elementType = Float32Type(), shape = ArrayAttribute(Seq.fill(rank)(IntData(-1))))
+    def genCompute(rules: Seq[Rule]): func.Func = {
 
         val inputTensors = getInputTensors(rules)
         val outputTensors = outputs.filterNot(inputTensors.contains)
         
 
         val inputTypes = symbols.map(_ => IndexType()) ++ inputTensors.map{
-            case (name, rank) =>
-                RankedMemrefType(elementType = Float32Type(), shape = ArrayAttribute(Seq.fill(rank)(IntData(-1))))
+            case (name, rank) => memrefType(rank)
         }
         val outputTypes = outputTensors.map {
-            case (name, rank) =>
-                RankedMemrefType(elementType = Float32Type(), shape = ArrayAttribute(Seq.fill(rank)(IntData(-1))))
+            case (name, rank) => memrefType(rank)
         }
-        val f = func.Func("stur", FunctionType(inputTypes, outputTypes), sym_visibility = None, Region(Seq(Block(
+        func.Func("stur", FunctionType(inputTypes, outputTypes), sym_visibility = None, Region(Seq(Block(
             inputTypes,
             args =>
                 val (symbolArgs, tensorArgs) = args.splitAt(symbols.length)
                 given values : mutable.Map[String, Value[?]] = mutable.Map.from((symbols.map(_.name) zip symbolArgs) ++ (inputTensors.map(_.name) zip tensorArgs))
                 rules.flatMap(genRule(_)(using CompressedTensor)) :+ func.Return(outputTensors.map(o => values(o.name)))
         ))))
-        CSE()(using RewriteMethods).simplify(f.body)
-        f
     }
+
+    def genReconstruct(rules: Seq[Rule]): Seq[func.Func] = {
+        val symbolTypes = symbols.map(_ => IndexType())
+        rules.map(rule =>
+            val tensorType = memrefType(rule.head.vars.length)
+            val inputTypes = symbolTypes :+ tensorType
+            func.Func(s"Reconstruct_${rule.head.name}", FunctionType(inputTypes, Seq()), sym_visibility = None, Region(Seq(Block(
+                inputTypes,
+                args =>
+                    val (symbolArgs, tensorArg) = args.splitAt(symbols.length)
+                    val values : mutable.Map[String, Value[?]] = mutable.Map.from((symbols.map(_.name) zip symbolArgs) ++ Seq(rule.head.name -> tensorArg.head))
+                    genRule(rule)(using RedundancyMap, values) :+ func.Return(Seq())
+            ))))
+        )
+    }
+
     def genRule(rule: Rule)(using kind: AccessType, values: mutable.Map[String, Value[?]]): Seq[Operation] = {
         values.get(rule.head.name) match
             // If the head is not defined, we allocate it
             case None => 
                 val dims = dimMap(rule.head.name)
                 val (dimValues, dimOps) = dims.map(indexGen).unzip
-                val alloc = memref.Alloc(dimValues.asInstanceOf[Seq[Value[IndexType]]], Seq(), Result(RankedMemrefType(elementType = Float32Type(), shape = ArrayAttribute(Seq.fill(rule.head.vars.length)(IntData(-1))))))
+                val alloc = memref.Alloc(dimValues.asInstanceOf[Seq[Value[IndexType]]], Seq(), Result(memrefType(rule.head.vars.length)))
                 (dimOps.flatten :+ alloc) ++ genRule(rule)(using kind, values += (rule.head.name -> alloc.memref))
             case Some(_) =>
                 val computationHead = rule.head
@@ -85,12 +96,12 @@ case class MLIRGen(symbols: Seq[Variable], iters_map: Map[String, Seq[Variable]]
         val lbs = conditions.collect {
             case Comparison("<=", i, v) if v == variable => i
             case Comparison("<", i, v) if v == variable => Arithmetic("+", i, ConstantInt(1))
-            case Comparison(">=", i, v) if i == variable => i
-            case Comparison(">", i, v) if i == variable => Arithmetic("+", i, ConstantInt(1)) 
+            case Comparison(">=", i, v) if i == variable => v
+            case Comparison(">", i, v) if i == variable => Arithmetic("+", v, ConstantInt(1)) 
         }.distinct
         val ubs = conditions.collect {
-            case Comparison("<=", i, v) if i == variable => Arithmetic("+", i, ConstantInt(1))
-            case Comparison("<", i, v) if i == variable => i
+            case Comparison("<=", i, v) if i == variable => Arithmetic("+", v, ConstantInt(1))
+            case Comparison("<", i, v) if i == variable => v
             case Comparison(">=", i, v) if v == variable => Arithmetic("+", i, ConstantInt(1))
             case Comparison(">", i, v) if v == variable => i
         }.distinct
@@ -181,28 +192,42 @@ case class MLIRGen(symbols: Seq[Variable], iters_map: Map[String, Seq[Variable]]
                     case _ =>
                         throw new Exception(s"Multiple equality constraints on iterator ${h.name} are not supported.")
             case Nil =>
-                val accesses = prod.exps.collect {
-                    case Access(name, vars, _) => 
-                        val result = Result(Float32Type())
-                        val loadOp = memref.Load(values(name).asInstanceOf[Value[MemrefType]], vars.map(v => values(v.name).asInstanceOf[Value[IndexType]]), result)
-                        (result, loadOp)
-                    case ConstantInt(c) => constantFloat(c)
-                    case ConstantDouble(c) => constantFloat(c)
-                }
-                val (factors, loadOps) = accesses.unzip
-                val (res, mulOps) = factors.tail.foldLeft((factors.head, Seq.empty[Operation])) {
-                    case ((acc, ops), b) =>
-                        val res = Result(Float32Type())
-                        val mulOp = arith.MulF(acc, b, res, arith.FastMathFlagsAttr(arith.FastMathFlags.fast))
-                        (res, ops :+ mulOp)
-                }
-                val headValue = values(head.name).asInstanceOf[Value[MemrefType]]
-                val headIndices = head.vars.map(v => values(v.name).asInstanceOf[Value[IndexType]])
+                kind match
+                    case CompressedTensor =>
+                        val accesses = prod.exps.collect {
+                            case Access(name, vars, _) => 
+                                val result = Result(Float32Type())
+                                val loadOp = memref.Load(values(name).asInstanceOf[Value[MemrefType]], vars.map(v => values(v.name).asInstanceOf[Value[IndexType]]), result)
+                                (result, loadOp)
+                            case ConstantInt(c) => constantFloat(c)
+                            case ConstantDouble(c) => constantFloat(c)
+                        }
+                        val (factors, loadOps) = accesses.unzip
+                        val (res, mulOps) = factors.tail.foldLeft((factors.head, Seq.empty[Operation])) {
+                            case ((acc, ops), b) =>
+                                val res = Result(Float32Type())
+                                val mulOp = arith.MulF(acc, b, res, arith.FastMathFlagsAttr(arith.FastMathFlags.fast))
+                                (res, ops :+ mulOp)
+                        }
+                        val headValue = values(head.name).asInstanceOf[Value[MemrefType]]
+                        val headIndices = head.vars.map(v => values(v.name).asInstanceOf[Value[IndexType]])
 
-                val loadOp = memref.Load(headValue, headIndices, Result(Float32Type()))
-                val addOp = arith.AddF(loadOp.result.asInstanceOf[Value[Float32Type]], res, Result(Float32Type()), arith.FastMathFlagsAttr(arith.FastMathFlags.fast))
-                val storeOp = memref.Store(addOp.result, values(head.name).asInstanceOf[Value[MemrefType]], headIndices)
-                loadOps ++ mulOps :+ loadOp :+ addOp :+ storeOp
+                        val loadOp = memref.Load(headValue, headIndices, Result(Float32Type()))
+                        val addOp = arith.AddF(loadOp.result.asInstanceOf[Value[Float32Type]], res, Result(Float32Type()), arith.FastMathFlagsAttr(arith.FastMathFlags.fast))
+                        val storeOp = memref.Store(addOp.result, values(head.name).asInstanceOf[Value[MemrefType]], headIndices)
+                        loadOps ++ mulOps :+ loadOp :+ addOp :+ storeOp
+                    case RedundancyMap =>
+                        val loadIndices = prod.exps.collect {
+                            case a: Access => a
+                        } match
+                            case Seq(access) =>
+                                access.vars.map(v => values(v.name).asInstanceOf[Value[IndexType]])
+                            case _ =>
+                                throw new Exception("Reconstruction rule should have a single rhs access.")
+                        val loadOp = memref.Load(values(head.name).asInstanceOf[Value[MemrefType]], loadIndices, Result(Float32Type()))
+                        val storeIndices = head.vars.map(v => values(v.name).asInstanceOf[Value[IndexType]])
+                        val storeOp = memref.Store(loadOp.result, values(head.name).asInstanceOf[Value[MemrefType]], storeIndices)
+                        Seq(loadOp, storeOp)
 
     }
 }
