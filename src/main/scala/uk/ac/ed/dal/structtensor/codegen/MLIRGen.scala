@@ -40,7 +40,7 @@ case class MLIRGen(symbols: Seq[Variable], iters_map: Map[String, Seq[Variable]]
         val outputTypes = outputTensors.map {
             case (name, rank) => memrefType(rank)
         }
-        func.Func("stur", FunctionType(inputTypes, outputTypes), sym_visibility = None, Region(Seq(Block(
+        func.Func("stur", FunctionType(inputTypes, outputTypes), sym_visibility = Some("private"), Region(Seq(Block(
             inputTypes,
             args =>
                 val (symbolArgs, tensorArgs) = args.splitAt(symbols.length)
@@ -54,7 +54,7 @@ case class MLIRGen(symbols: Seq[Variable], iters_map: Map[String, Seq[Variable]]
         rules.map(rule =>
             val tensorType = memrefType(rule.head.vars.length)
             val inputTypes = symbolTypes :+ tensorType
-            func.Func(s"Reconstruct_${rule.head.name}", FunctionType(inputTypes, Seq()), sym_visibility = None, Region(Seq(Block(
+            func.Func(s"Reconstruct_${rule.head.name}", FunctionType(inputTypes, Seq()), sym_visibility = Some("private"), Region(Seq(Block(
                 inputTypes,
                 args =>
                     val (symbolArgs, tensorArg) = args.splitAt(symbols.length)
