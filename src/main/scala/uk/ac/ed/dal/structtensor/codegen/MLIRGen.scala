@@ -81,19 +81,19 @@ case class MLIRGen(symbols: Seq[Variable], iters_map: Map[String, Seq[Variable]]
         val eqs = conditions.collect {
             case Comparison("=", i, v) if v == variable => i
             case Comparison("=", i, v) if i == variable => v 
-        }
+        }.distinct
         val lbs = conditions.collect {
             case Comparison("<=", i, v) if v == variable => i
             case Comparison("<", i, v) if v == variable => Arithmetic("+", i, ConstantInt(1))
             case Comparison(">=", i, v) if i == variable => i
             case Comparison(">", i, v) if i == variable => Arithmetic("+", i, ConstantInt(1)) 
-        }
+        }.distinct
         val ubs = conditions.collect {
             case Comparison("<=", i, v) if i == variable => Arithmetic("+", i, ConstantInt(1))
             case Comparison("<", i, v) if i == variable => i
             case Comparison(">=", i, v) if v == variable => Arithmetic("+", i, ConstantInt(1))
             case Comparison(">", i, v) if v == variable => i
-        }
+        }.distinct
         (lbs, ubs, eqs)
     }
 
@@ -108,10 +108,7 @@ case class MLIRGen(symbols: Seq[Variable], iters_map: Map[String, Seq[Variable]]
 
         given iterConds : Map[Variable, Seq[Comparison]] = conditions.groupBy { cond =>
             val condVars = Compiler.getAllVariables(cond)
-            condVars.maxBy(v => iters.indexOf(v) match
-                case -1 => 0
-                case i => i
-            )
+            condVars.maxBy(variables.indexOf)
         }
 
         genSingleProdRec(prod, head, variables)
@@ -164,18 +161,25 @@ case class MLIRGen(symbols: Seq[Variable], iters_map: Map[String, Seq[Variable]]
     def genSingleProdRec(prod: Prod, head: Access, iters: Seq[Variable])(using kind: AccessType, values: mutable.Map[String, Value[?]], iterConds: Map[Variable, Seq[Comparison]]): Seq[Operation] = {
         iters match
             case h::t =>
-                // println(s"Generating loop for variable $h")
-                // println(s"Product: ${prod.toString()}")
-                // println(s"Gathered conditions: ${iterConds.getOrElse(h, Seq())}")
                 val (lbs, ubs, eqs) = getBoundsOnVariable(h, iterConds.getOrElse(h, Seq()))
-                val (lbVal, lbOps) = lbGen(lbs)
-                val (ubVal, ubOps) = ubGen(ubs)
-                val step = Result(IndexType())
-                val stepOp = arith.Constant(IntegerAttr(IntData(1), IndexType()), step)
-                val loop = scf.ForOp(lowerBound = lbVal, upperBound = ubVal, step = step, initArgs = Seq(), resultss = Seq(), region = Region(Block(IndexType(), arg =>
-                    given mutable.Map[String, Value[?]] = values += (h.name -> arg) 
-                    genSingleProdRec(prod, head, t) :+ scf.YieldOp(Seq()))))
-                lbOps ++ ubOps :+ stepOp :+ loop
+                eqs match
+                    case Seq(to) =>
+                        val (indexValue, indexOps) = indexGen(to)
+                        {
+                            given mutable.Map[String, Value[?]] = values += (h.name -> indexValue)
+                            indexOps ++ genSingleProdRec(prod, head, t)
+                        }
+                    case Nil =>
+                        val (lbVal, lbOps) = lbGen(lbs)
+                        val (ubVal, ubOps) = ubGen(ubs)
+                        val step = Result(IndexType())
+                        val stepOp = arith.Constant(IntegerAttr(IntData(1), IndexType()), step)
+                        val loop = scf.ForOp(lowerBound = lbVal, upperBound = ubVal, step = step, initArgs = Seq(), resultss = Seq(), region = Region(Block(IndexType(), arg =>
+                            given mutable.Map[String, Value[?]] = values += (h.name -> arg)
+                            genSingleProdRec(prod, head, t) :+ scf.YieldOp(Seq()))))
+                        lbOps ++ ubOps :+ stepOp :+ loop
+                    case _ =>
+                        throw new Exception(s"Multiple equality constraints on iterator ${h.name} are not supported.")
             case Nil =>
                 val accesses = prod.exps.collect {
                     case Access(name, vars, _) => 
