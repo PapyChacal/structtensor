@@ -306,10 +306,10 @@ object Main {
           
           val mlirGen = MLIRGen(symbols, iters_map, dimMap, outputs)
           val compute = mlirGen.genCompute(ccRuleSeq)
-
           val reconstructs = mlirGen.genReconstruct(rcRuleSeq)
+          val main = mlirGen.genMain(ccRuleSeq)
 
-          val module = ModuleOp(Region(compute +: reconstructs))
+          val module = ModuleOp(Region(compute +: (reconstructs ++ main)))
           CSE()(using RewriteMethods).simplify(module.body)
           val printer = config.outFilePath match
             case "" => Printer()

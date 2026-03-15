@@ -8,12 +8,76 @@ import compiler.*
 import scair.ir.*
 
 import Codegen.reorder
-import scair.dialects.{func, scf, arith, memref}
+import scair.dialects.{func, scf, arith, memref, llvm}
 import scair.dialects.builtin.*
 import scair.dialects.arith.AnyIntegerType
 import uk.ac.ed.dal.structtensor.parser.Convertor.getAllTensors
 
+
+
 case class MLIRGen(symbols: Seq[Variable], iters_map: Map[String, Seq[Variable]], dimMap: Map[String, Seq[Dim]], outputs: Seq[(name: String, rank: Int)]) {
+
+    def genMain(rules: Seq[Rule]): Seq[func.Func] = {
+        val inputTypes = Seq(IndexType(), llvm.Ptr())
+        val main = func.Func("main", FunctionType(inputTypes, Seq(IndexType())), sym_visibility = None, Region(Seq(Block(inputTypes, args =>
+            val (argc, argv) = (args.head.asInstanceOf[Value[IndexType]], args.tail.head.asInstanceOf[Value[llvm.Ptr]])
+            val (nSymbolsV, nSymbolsOp) = constantIndex(symbols.length + 1)
+            val argcCmpV = Result(I1)
+            val argcCmp = arith.CmpI(argc, nSymbolsV, argcCmpV, arith.CmpIPredicate.eq)
+            val ifV = Result(IndexType())
+            val ifOp = scf.IfOp(argcCmpV,
+            thenRegion = Region(Block({
+                val (zeroV, zeroOp) = constantIndex(0)
+                val (symbolsV, symbolsOps) = (1 to (symbols.length)).map(i =>
+                    val (offsetV, offsetOp) = constantIndex(i, I64)
+                    val symbolStrPV = Result(llvm.Ptr())
+                    val symbolStrPOp = llvm.GetElementPtr(base = argv, dynamicIndices = Seq(), symbolStrPV, DenseArrayAttr(typ = I32, data = Seq(IntegerAttr(IntData(i), I32))), elem_type = llvm.Ptr())
+                    val symbolStrV = Result(llvm.Ptr())
+                    val symbolStrOp = llvm.Load(symbolStrPV, symbolStrV)
+                    val symbolV = Result(IndexType())
+                    val symbolOp = func.Call(SymbolRefAttr("atol"), Seq(symbolStrV), Seq(symbolV))
+                    (symbolV, Seq(offsetOp, symbolStrPOp, symbolStrOp, symbolOp))
+                ).unzip
+
+                given symbolsMap : mutable.Map[String, Value[?]] = mutable.Map.from(symbols.map(_.name) zip symbolsV)
+                val inputTensorsNames = getInputTensors(rules).map(_.name)
+                val (inputTensors, inputTensorsOps) = getInputTensors(rules).map{
+                    case (name, rank) =>
+                        val dims = dimMap(name)
+                        val (dimsV, dimsOps) = dims.map(indexGen).unzip
+                        val allocV = Result(memrefType(rank))
+                        val alloc = memref.Alloc(dimsV.asInstanceOf[Seq[Value[IndexType]]], Seq(), allocV)
+                        (allocV, dimsOps.flatten :+ alloc)
+                }.unzip
+
+                val valuesMap : mutable.Map[String, Value[?]] = symbolsMap ++ (inputTensorsNames zip inputTensors)
+
+                val outputTensors = outputs.filterNot(getInputTensors(rules).contains)
+                val outputTypes = outputTensors.map {
+                    case (name, rank) => memrefType(rank)
+                }
+                val results = outputTypes.map(Result.apply)
+                val call = func.Call(SymbolRefAttr("compute"), symbolsV ++ inputTensors, results)
+
+                val reconstructs = outputTensors zip call.results map{
+                    case ((name, rank), result) =>
+                        func.Call(SymbolRefAttr(s"Reconstruct_$name"), symbolsV :+ result, Seq())
+                }
+                val y = scf.YieldOp(Seq(symbolsV.head))
+                (zeroOp +: (symbolsOps.flatten ++ inputTensorsOps.flatten) :+ call) ++ reconstructs :+ y
+            })),
+            elseRegion = Region(Block({
+                val (zeroV, zeroOp) = constantIndex(12)
+                val y = scf.YieldOp(Seq(zeroV))
+                Seq(zeroOp, y)
+            })),
+            Seq(ifV)
+            )
+            val ret = func.Return(Seq(ifV))
+            Seq(nSymbolsOp, argcCmp, ifOp, ret)
+        ))))
+        Seq(func.Func("atol", FunctionType(Seq(llvm.Ptr()), Seq(IndexType())), Some("private"), Region()), main)
+    }
 
     def getInputTensors(rules: Seq[Rule], defined: Seq[String] = Seq.empty): Seq[(name: String, rank: Int)] = {
         rules match
@@ -40,7 +104,7 @@ case class MLIRGen(symbols: Seq[Variable], iters_map: Map[String, Seq[Variable]]
         val outputTypes = outputTensors.map {
             case (name, rank) => memrefType(rank)
         }
-        func.Func("stur", FunctionType(inputTypes, outputTypes), sym_visibility = Some("private"), Region(Seq(Block(
+        func.Func("compute", FunctionType(inputTypes, outputTypes), sym_visibility = Some("private"), Region(Seq(Block(
             inputTypes,
             args =>
                 val (symbolArgs, tensorArgs) = args.splitAt(symbols.length)
@@ -129,8 +193,8 @@ case class MLIRGen(symbols: Seq[Variable], iters_map: Map[String, Seq[Variable]]
         index match
             case v: Variable => (values(v.name).asInstanceOf[Value[AnyIntegerType]], Seq())
             case ConstantInt(c) => 
-                val constantOp = arith.Constant(IntegerAttr(IntData(c), IndexType()), Result(IndexType()))
-                (constantOp.result.asInstanceOf[Value[AnyIntegerType]], Seq(constantOp))
+                val (v, o) = constantIndex(c)
+                (v, Seq(o))
             case Arithmetic(op, lhs, rhs) =>
                 val (lhsVal, lhsOps) = indexGen(lhs)
                 val (rhsVal, rhsOps) = indexGen(rhs)
@@ -168,6 +232,10 @@ case class MLIRGen(symbols: Seq[Variable], iters_map: Map[String, Seq[Variable]]
         val constantOp = arith.Constant(FloatAttr(FloatData(d), Float32Type()), result)
         (result, constantOp)
     }
+    def constantIndex[T <: AnyIntegerType](c: Int, t: T = IndexType()): (Value[T], Operation) =
+        val result = Result(t)
+        val constantOp = arith.Constant(IntegerAttr(IntData(c), t), result)
+        (result, constantOp)
     
     def genSingleProdRec(prod: Prod, head: Access, iters: Seq[Variable])(using kind: AccessType, values: mutable.Map[String, Value[?]], iterConds: Map[Variable, Seq[Comparison]]): Seq[Operation] = {
         iters match
@@ -183,8 +251,7 @@ case class MLIRGen(symbols: Seq[Variable], iters_map: Map[String, Seq[Variable]]
                     case Nil =>
                         val (lbVal, lbOps) = lbGen(lbs)
                         val (ubVal, ubOps) = ubGen(ubs)
-                        val step = Result(IndexType())
-                        val stepOp = arith.Constant(IntegerAttr(IntData(1), IndexType()), step)
+                        val (step, stepOp) = constantIndex(1)
                         val loop = scf.ForOp(lowerBound = lbVal, upperBound = ubVal, step = step, initArgs = Seq(), resultss = Seq(), region = Region(Block(IndexType(), arg =>
                             given mutable.Map[String, Value[?]] = values += (h.name -> arg)
                             genSingleProdRec(prod, head, t) :+ scf.YieldOp(Seq()))))
