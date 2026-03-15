@@ -148,7 +148,7 @@ case class MLIRGen(
           prod.exps.collect { case Access(name, vars, _) =>
             (name, vars.length)
           }
-        )
+        ).filterNot(t => defined.contains(t._1))
         val head = h.head.name
         (inputs ++ getInputTensors(t, defined :+ head)).distinct
 
