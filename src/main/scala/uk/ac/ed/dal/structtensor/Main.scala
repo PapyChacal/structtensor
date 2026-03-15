@@ -297,20 +297,18 @@ object Main {
           given AccessType = CompressedTensor
           val dimInfoMap = dimInfo_computation.distinct.toAccessMap
           val distinctTensors = getAllTensors(ccRuleSeq).distinctBy(_.name)
-
-          val dimMap = distinctTensors.map(t => (t.name -> dimInfoMap(t))).toMap
-
-          val outputs = (outputs_names match
+          val dimMap = distinctTensors.map(t => t.name -> dimInfoMap(t)).toMap
+          val outputNames = outputs_names match
             case Nil => distinctTensors.map(_.name)
-            case names => names).map(n => (name = n, rank = dimMap(n).length))
-          
-          val mlirGen = MLIRGen(symbols, iters_map, dimMap, outputs)
-          val compute = mlirGen.genCompute(ccRuleSeq)
-          val reconstructs = mlirGen.genReconstruct(rcRuleSeq)
-          val main = mlirGen.genMain(ccRuleSeq)
+            case names => names
+          val outputs = outputNames.map(n => (name = n, rank = dimMap(n).length))
 
-          val module = ModuleOp(Region(compute +: (reconstructs ++ main)))
+          val mlirGen = MLIRGen(symbols, iters_map, dimMap, outputs)
+          val module = ModuleOp(
+            Region(mlirGen.genCompute(ccRuleSeq) +: (mlirGen.genReconstruct(rcRuleSeq) ++ mlirGen.genMain(ccRuleSeq)))
+          )
           CSE()(using RewriteMethods).simplify(module.body)
+
           val printer = config.outFilePath match
             case "" => Printer()
             case path => Printer(p = PrintWriter(FileWriter(path)))
