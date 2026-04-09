@@ -49,9 +49,8 @@ case class MLIRGen(
                     val symbolStrPV = Result(llvm.Ptr())
                     val symbolStrPOp = llvm.GetElementPtr(
                       base = argv,
-                      dynamicIndices = Seq(),
-                      symbolStrPV,
-                      DenseArrayAttr(
+                      res = symbolStrPV,
+                      rawConstantIndices = DenseArrayAttr(
                         typ = I32,
                         data = Seq(IntegerAttr(IntData(i), I32)),
                       ),
@@ -81,8 +80,7 @@ case class MLIRGen(
                       val allocV = Result(memrefType(rank))
                       val alloc = memref.Alloc(
                         dimsV.asInstanceOf[Seq[Value[IndexType]]],
-                        Seq(),
-                        allocV,
+                        memref = allocV,
                       )
                       (allocV, dimsOps.flatten :+ alloc)
                     }.unzip
@@ -107,7 +105,6 @@ case class MLIRGen(
                       func.Call(
                         SymbolRefAttr(s"Reconstruct_$name"),
                         symbolsV :+ result,
-                        Seq(),
                       )
                   }
                   val y = scf.YieldOp(Seq(symbolsV.head))
@@ -132,7 +129,6 @@ case class MLIRGen(
         "atol",
         FunctionType(Seq(llvm.Ptr()), Seq(IndexType())),
         Some("private"),
-        Region(),
       ),
       main,
     )
@@ -197,7 +193,7 @@ case class MLIRGen(
       val inputTypes = symbolTypes :+ tensorType
       func.Func(
         s"Reconstruct_${rule.head.name}",
-        FunctionType(inputTypes, Seq()),
+        FunctionType(inputTypes),
         sym_visibility = Some("private"),
         Region(
           Seq(
@@ -210,7 +206,7 @@ case class MLIRGen(
                     (symbols.map(_.name) zip symbolArgs) ++
                       Seq(rule.head.name -> tensorArg.head)
                   )
-                genRule(rule)(using RedundancyMap, values) :+ func.Return(Seq()),
+                genRule(rule)(using RedundancyMap, values) :+ func.Return(),
             )
           )
         ),
@@ -227,9 +223,8 @@ case class MLIRGen(
         val dims = dimMap(rule.head.name)
         val (dimValues, dimOps) = dims.map(indexGen).unzip
         val alloc = memref.Alloc(
-          dimValues.asInstanceOf[Seq[Value[IndexType]]],
-          Seq(),
-          Result(memrefType(rule.head.vars.length)),
+          dynamicSizes = dimValues.asInstanceOf[Seq[Value[IndexType]]],
+          memref = Result(memrefType(rule.head.vars.length)),
         )
         (dimOps.flatten :+ alloc) ++
           genRule(rule)(using kind, values += (rule.head.name -> alloc.memref))
@@ -364,15 +359,13 @@ case class MLIRGen(
               lowerBound = lbVal,
               upperBound = ubVal,
               step = step,
-              initArgs = Seq(),
-              resultss = Seq(),
               region = Region(
                 Block(
                   IndexType(),
                   arg =>
                     given mutable.Map[String, Value[?]] = values +=
                       (h.name -> arg)
-                    genSingleProdRec(prod, head, t) :+ scf.YieldOp(Seq()),
+                    genSingleProdRec(prod, head, t) :+ scf.YieldOp(),
                 )
               ),
             )
